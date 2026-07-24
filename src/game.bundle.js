@@ -11,6 +11,7 @@
     ["KeyZ", "fire"],
     ["Space", "fire"],
     ["KeyX", "activate"],
+    ["Enter", "start"],
     ["Digit1", "stage1"],
     ["Digit2", "stage2"],
     ["Digit3", "stage3"],
@@ -33,12 +34,12 @@
   const TAU = Math.PI * 2;
   const RESPAWN_INVINCIBLE = 5;
   const LASER_GROW_SPEED = 980;
-  const CRASH_GRAVITY = 120;
+  const CRASH_DURATION = 3;
   const AIR_DURATION = 20;
   const MAIN_DURATION = 120;
   const FORMATION_SIZE = 8;
-  const CAPSULE_CYCLE_MAX = 7;
-  const GAUGE_LABELS = [...POWERUPS, ""];
+  const CAPSULE_CYCLE_MAX = 6;
+  const GAUGE_LABELS = [...POWERUPS];
 
   const COLORS = {
     cyan: "#75f7ff",
@@ -70,7 +71,16 @@
       this.keys = new Set();
       this.usingGamepad = false;
       this.stageSelectLatch = 0;
-      this.state = { x: 0, y: 0, fire: false, activate: false, stageSelect: 0 };
+      this.gamepadButtons = new Set();
+      this.state = {
+        x: 0,
+        y: 0,
+        fire: false,
+        activate: false,
+        start: false,
+        stageSelect: 0,
+        stageStep: 0,
+      };
 
       window.addEventListener("keydown", (event) => {
         if (/^[1-8]$/.test(event.key)) {
@@ -108,7 +118,9 @@
       this.state.y = Number(active.has("down")) - Number(active.has("up"));
       this.state.fire = active.has("fire");
       this.state.activate = active.has("activate");
+      this.state.start = active.has("start");
       this.state.stageSelect = this.stageSelectLatch;
+      this.state.stageStep = 0;
       this.stageSelectLatch = 0;
     }
 
@@ -116,22 +128,38 @@
       const pads = navigator.getGamepads?.() ?? [];
       const pad = [...pads].find(Boolean);
 
-      if (!pad) return;
+      if (!pad) {
+        this.gamepadButtons.clear();
+        return;
+      }
 
       const axisX = Math.abs(pad.axes[0] ?? 0) > 0.22 ? pad.axes[0] : 0;
       const axisY = Math.abs(pad.axes[1] ?? 0) > 0.22 ? pad.axes[1] : 0;
       const dpadX = Number(pad.buttons[15]?.pressed) - Number(pad.buttons[14]?.pressed);
       const dpadY = Number(pad.buttons[13]?.pressed) - Number(pad.buttons[12]?.pressed);
-      const fire = Boolean(pad.buttons[0]?.pressed || pad.buttons[5]?.pressed || pad.buttons[7]?.pressed);
-      const activate = Boolean(pad.buttons[1]?.pressed || pad.buttons[4]?.pressed);
+      const buttonDown = (index) =>
+        Boolean(pad.buttons[index]?.pressed || (pad.buttons[index]?.value ?? 0) > 0.35);
+      const fire = [0, 2, 5, 7].some(buttonDown);
+      const activate = [1, 3, 4, 6].some(buttonDown);
+      const start = buttonDown(9);
+      const currentButtons = new Set(
+        pad.buttons
+          .map((button, index) => (button.pressed || button.value > 0.35 ? index : -1))
+          .filter((index) => index >= 0),
+      );
+      const leftPressed = currentButtons.has(14) && !this.gamepadButtons.has(14);
+      const rightPressed = currentButtons.has(15) && !this.gamepadButtons.has(15);
 
-      if (axisX || axisY || dpadX || dpadY || fire || activate) {
+      if (axisX || axisY || dpadX || dpadY || fire || activate || start) {
         this.usingGamepad = true;
         this.state.x = dpadX || axisX;
         this.state.y = dpadY || axisY;
         this.state.fire = fire;
         this.state.activate = activate;
+        this.state.start = start;
+        this.state.stageStep = Number(rightPressed) - Number(leftPressed);
       }
+      this.gamepadButtons = currentButtons;
     }
   }
 
@@ -153,6 +181,8 @@
       this.formationTimer = 0;
       this.formationsLaunched = 0;
       this.nextFormationId = 1;
+      this.nextSpaceWaveId = 1;
+      this.nextCruiserId = 1;
       this.sphereSpawnCount = 0;
       this.formationGroups = new Map();
       this.bossSpawned = false;
@@ -164,6 +194,8 @@
       this.walkerStates = [];
       this.jumperStates = [];
       this.laserDroneStates = [];
+      this.spaceAssault = null;
+      this.meteorRush = null;
       this.loopClearTimer = 0;
       this.killCount = 0;
       this.powerCapsules = 0;
@@ -179,6 +211,7 @@
         x: 150,
         y: height * 0.5,
         radius: 18,
+        hitRadius: 9,
         cooldown: 0,
         missileCooldown: 0,
         invincible: 0,
@@ -191,6 +224,9 @@
         crashing: false,
         crashVy: 0,
         crashSpin: 0,
+        crashTimer: 0,
+        crashStartY: 0,
+        crashSmokeTimer: 0,
         angle: 0,
         trail: [],
       };
@@ -205,18 +241,24 @@
       this.capsules = [];
       this.lasers = [];
       this.bursts = [];
+      this.smoke = [];
     }
 
     update(dt, input) {
       this.time += dt;
       this.flashTimer = Math.max(0, this.flashTimer - dt);
       this.updateStars(dt);
+      this.updateSmoke(dt);
 
       if (this.mode === "title") {
-        const startHeld = input.fire || input.activate;
+        const startHeld = input.start || input.fire || input.activate;
         if (input.stageSelect > 0) {
           this.selectedStageIndex = input.stageSelect - 1;
           this.flash(`START STAGE ${input.stageSelect}`);
+        } else if (input.stageStep) {
+          this.selectedStageIndex =
+            (this.selectedStageIndex + input.stageStep + STAGES.length) % STAGES.length;
+          this.flash(`START STAGE ${this.selectedStageIndex + 1}`);
         } else if (startHeld && !this.startWasHeld) {
           this.startGame(this.selectedStageIndex);
         }
@@ -243,6 +285,8 @@
 
       if (this.mode === "crashing") {
         this.updateCrash(dt);
+        this.updateStageObjects(dt);
+        this.updateSpawns(dt);
         this.updateWeapons(dt, { fire: false });
         this.updateEnemies(dt);
         this.updateSouls(dt);
@@ -280,7 +324,7 @@
       if (this.stagePhase === "bossClear") return "BOSS DOWN";
       if (this.stagePhase === "boss") return `${STAGES[this.stageIndex].name} BOSS`;
       if (this.stagePhase === "air") return `${STAGES[this.stageIndex].name} AIR`;
-      return usingGamepad ? "TRIGGER 1 FIRE / BUTTON 2 POWER" : "Z FIRE / X POWER";
+      return usingGamepad ? "A / R2 FIRE • B / L1 POWER" : "Z FIRE / X POWER";
     }
 
     snapshot() {
@@ -300,6 +344,7 @@
         capsules: this.capsules,
         lasers: this.lasers,
         bursts: this.bursts,
+        smoke: this.smoke,
         powerCapsules: this.powerCapsules,
         powerups: GAUGE_LABELS,
         powerupAvailable: GAUGE_LABELS.map((name) => Boolean(name) && this.canActivatePowerup(name)),
@@ -387,6 +432,7 @@
 
     pointHitsTerrain(x, y) {
       if (!this.isStageTerrainActive()) return false;
+      if (STAGES[this.stageIndex].spaceAssault || STAGES[this.stageIndex].meteorRush) return false;
       if (this.pointHitsDiamondTerrain(x, y, 0)) return true;
       if (this.pointHitsCircleTerrain(x, y, 0)) return true;
       const stage = STAGES[this.stageIndex];
@@ -441,7 +487,11 @@
         return;
       }
 
-      if (this.stagePhase === "main" && this.phaseTimer >= MAIN_DURATION) {
+      if (
+        this.stagePhase === "main" &&
+        !STAGES[this.stageIndex].spaceAssault &&
+        this.phaseTimer >= MAIN_DURATION
+      ) {
         this.enterStagePhase("boss");
       }
 
@@ -502,6 +552,23 @@
         ...drone,
         spawned: false,
       }));
+      this.spaceAssault = stage.spaceAssault
+        ? {
+            waveTimer: 0.8,
+            waveIndex: 0,
+            smallGroupsSpawned: 0,
+            mediumTimer: 4,
+            mediumMachinesSpawned: 0,
+            loopIndex: 0,
+          }
+        : null;
+      this.meteorRush = stage.meteorRush
+        ? {
+            meteorTimer: 0.25,
+            enemyTimer: 0.5,
+            lateStreamY: null,
+          }
+        : null;
       this.bossBeams.length = 0;
       this.volcanoShots.length = 0;
     }
@@ -509,18 +576,193 @@
     updateStageObjects(dt) {
       const stage = STAGES[this.stageIndex];
       if (
-        this.mode !== "playing" ||
+        (this.mode !== "playing" && this.mode !== "crashing") ||
         this.stagePhase !== "main" ||
-        (!stage.terrainMode && !stage.sphereSpawner && !stage.jumpers && !stage.laserDrones)
+        (
+          !stage.terrainMode &&
+          !stage.sphereSpawner &&
+          !stage.jumpers &&
+          !stage.laserDrones &&
+          !stage.spaceAssault &&
+          !stage.meteorRush
+        )
       ) return;
 
-      this.stageScroll += 92 * dt;
+      if (!stage.spaceAssault && !stage.meteorRush) this.stageScroll += 92 * dt;
+      this.updateSpaceAssault(dt, stage);
+      this.updateMeteorRush(dt, stage);
       this.updateVolcano(dt, stage);
       this.updateGenerators(dt);
       this.updateWalkerSpawns();
       this.updateJumperSpawns();
       this.updateLaserDroneSpawns();
       this.updateSphereSpawner(dt, stage);
+    }
+
+    updateMeteorRush(dt, stage) {
+      if (!stage.meteorRush || !this.meteorRush) return;
+
+      const rush = this.meteorRush;
+      const finalDuration = stage.meteorRush.finalDuration ?? 25;
+      const isFinalRush = this.phaseTimer >= MAIN_DURATION - finalDuration;
+
+      rush.meteorTimer -= dt;
+      if (rush.meteorTimer <= 0) {
+        rush.meteorTimer = stage.meteorRush.meteorInterval ?? 0.72;
+        this.spawnMeteor();
+      }
+
+      if (isFinalRush && rush.lateStreamY == null) {
+        rush.lateStreamY = 110 + Math.random() * (this.height - 260);
+      }
+
+      rush.enemyTimer -= dt;
+      if (rush.enemyTimer > 0) return;
+
+      rush.enemyTimer = isFinalRush
+        ? (stage.meteorRush.finalEnemyInterval ?? 0.2)
+        : (stage.meteorRush.enemyInterval ?? 0.5);
+      this.spawnMeteorRaider(isFinalRush, rush.lateStreamY);
+    }
+
+    spawnMeteor() {
+      const verticalDirection = Math.random() < 0.5 ? -1 : 1;
+      const radius = 36 + Math.random() * 56;
+      const hp = Math.max(2, Math.ceil(radius / 10));
+      this.enemies.push({
+        type: "meteor",
+        x: this.width + radius + 20,
+        y: 75 + Math.random() * (this.height - 175),
+        vx: -185 - Math.random() * 115,
+        vy: verticalDirection * (18 + Math.random() * 38),
+        radius,
+        hp,
+        maxHp: hp,
+        spin: Math.random() * TAU,
+        spinSpeed: (Math.random() - 0.5) * 5,
+        fireTimer: 999,
+        scoreValue: 70 + Math.round(radius * 3),
+      });
+    }
+
+    spawnMeteorRaider(isFinalRush, streamY) {
+      this.enemies.push({
+        type: "meteorRaider",
+        x: this.width + 50,
+        y: isFinalRush ? streamY : 85 + Math.random() * (this.height - 205),
+        vx: isFinalRush ? -610 : -520,
+        radius: 17,
+        hp: 1,
+        maxHp: 1,
+        fireTimer: 0.04,
+        shotInterval: isFinalRush ? 0.36 : 0.48,
+        aimBehind: isFinalRush,
+        phase: Math.random() * TAU,
+        scoreValue: 90,
+      });
+    }
+
+    updateSpaceAssault(dt, stage) {
+      if (!stage.spaceAssault || !this.spaceAssault) return;
+
+      const assault = this.spaceAssault;
+      const smallGroupsPerLoop = stage.spaceAssault.smallGroupsPerLoop ?? 16;
+      const mediumCountPerLoop = stage.spaceAssault.mediumCountPerLoop ?? 4;
+
+      if (assault.smallGroupsSpawned < smallGroupsPerLoop) assault.waveTimer -= dt;
+      if (assault.waveTimer <= 0 && assault.smallGroupsSpawned < smallGroupsPerLoop) {
+        this.spawnSpaceFighterWave(assault.waveIndex);
+        assault.waveIndex += 1;
+        assault.smallGroupsSpawned += 1;
+        assault.waveTimer = stage.spaceAssault.waveInterval ?? 1.65;
+      }
+
+      if (assault.mediumMachinesSpawned < mediumCountPerLoop) assault.mediumTimer -= dt;
+      if (assault.mediumTimer <= 0 && assault.mediumMachinesSpawned < mediumCountPerLoop) {
+        this.spawnSpaceCruiser(assault.mediumMachinesSpawned);
+        assault.mediumMachinesSpawned += 1;
+        assault.mediumTimer = stage.spaceAssault.mediumSpawnInterval ?? 6;
+      }
+
+      if (
+        assault.smallGroupsSpawned < smallGroupsPerLoop ||
+        assault.mediumMachinesSpawned < mediumCountPerLoop
+      ) return;
+
+      const encounterEnemiesRemain = this.enemies.some(
+        (enemy) => enemy.type === "spaceFighter" || enemy.type === "spaceCruiser",
+      );
+      const encounterLasersRemain = this.bossBeams.some((beam) => beam.type === "cruiserLaser");
+      if (encounterEnemiesRemain || encounterLasersRemain) return;
+
+      assault.loopIndex += 1;
+      if (assault.loopIndex >= (stage.spaceAssault.loopCount ?? 2)) {
+        this.enterStagePhase("boss");
+        return;
+      }
+
+      assault.waveTimer = 0.8;
+      assault.waveIndex = 0;
+      assault.smallGroupsSpawned = 0;
+      assault.mediumTimer = 4;
+      assault.mediumMachinesSpawned = 0;
+      this.flash(`ASSAULT LOOP ${assault.loopIndex + 1}`);
+    }
+
+    spawnSpaceFighterWave(waveIndex) {
+      const pattern = STAGES[this.stageIndex].spaceAssault?.wavePattern ??
+        ["top", "bottom", "top", "bottom", "top", "bottom", "bottom", "top"];
+      const side = pattern[waveIndex % pattern.length];
+      const targetRows = [0.25, 0.5, 0.75, 0.5];
+      const waveId = this.nextSpaceWaveId;
+      const waveStartTime = this.time;
+      const enterDuration = 1.25;
+      this.nextSpaceWaveId += 1;
+
+      for (let index = 0; index < 4; index += 1) {
+        const startY = side === "top" ? -42 : this.height + 42;
+        this.enemies.push({
+          type: "spaceFighter",
+          waveId,
+          waveStartTime,
+          x: this.width * (1 - (index + 1) / 8),
+          y: startY,
+          startY,
+          targetY: this.height * targetRows[index],
+          enterDuration,
+          fireAt: waveStartTime + enterDuration + 0.3,
+          exitAt: waveStartTime + enterDuration + 0.8,
+          side,
+          state: "enter",
+          radius: 17,
+          hp: 1,
+          maxHp: 1,
+          phase: index * 0.7,
+          scoreValue: 100,
+        });
+      }
+    }
+
+    spawnSpaceCruiser(order) {
+      const cruiserId = this.nextCruiserId;
+      this.nextCruiserId += 1;
+      this.enemies.push({
+        type: "spaceCruiser",
+        cruiserId,
+        x: this.width + 110,
+        y: this.height * (0.32 + (order % 2) * 0.36),
+        targetX: this.width * 0.75,
+        targetY: this.height * (0.32 + (order % 2) * 0.36),
+        state: "enter",
+        radius: 52,
+        hp: 34,
+        maxHp: 34,
+        fireTimer: 0.7,
+        laserCount: 0,
+        moveDirection: order % 2 === 0 ? 1 : -1,
+        phase: 0,
+        scoreValue: 1200,
+      });
     }
 
     updateVolcano(dt, stage) {
@@ -884,26 +1126,28 @@
 
     resolvePlayerTerrainCollision() {
       if (!this.isStageTerrainActive() || this.player.invincible > 0) return;
+      if (STAGES[this.stageIndex].spaceAssault || STAGES[this.stageIndex].meteorRush) return;
 
-      const terrainSlack = 12;
+      const terrainSlack = 6;
+      const terrainHitRadius = this.player.hitRadius;
       const stage = STAGES[this.stageIndex];
       if (
-        this.pointHitsDiamondTerrain(this.player.x, this.player.y, this.player.radius - terrainSlack) ||
-        this.pointHitsCircleTerrain(this.player.x, this.player.y, this.player.radius - terrainSlack)
+        this.pointHitsDiamondTerrain(this.player.x, this.player.y, terrainHitRadius - terrainSlack) ||
+        this.pointHitsCircleTerrain(this.player.x, this.player.y, terrainHitRadius - terrainSlack)
       ) {
         this.damagePlayerFromTerrain();
         return;
       }
 
       if (stage.terrainMode !== "normal" && stage.terrainMode !== "inverted") {
-        const bottom = this.terrainY(this.player.x) - this.player.radius + terrainSlack;
+        const bottom = this.terrainY(this.player.x) - terrainHitRadius + terrainSlack;
         if (this.player.y <= bottom) return;
         this.damagePlayerFromTerrain(bottom);
         return;
       }
 
-      const top = this.stageSurfaceY(this.player.x, "top") + this.player.radius - terrainSlack;
-      const bottom = this.stageSurfaceY(this.player.x, "bottom") - this.player.radius + terrainSlack;
+      const top = this.stageSurfaceY(this.player.x, "top") + terrainHitRadius - terrainSlack;
+      const bottom = this.stageSurfaceY(this.player.x, "bottom") - terrainHitRadius + terrainSlack;
       const hitTop = this.player.y < top;
       const hitBottom = this.player.y > bottom;
       if (!hitTop && !hitBottom) return;
@@ -950,6 +1194,7 @@
       this.missiles.length = 0;
       this.lasers.length = 0;
       this.options.length = 0;
+      this.smoke.length = 0;
       this.gameOverTimer = 0;
       this.gameOverCanConfirm = false;
       this.respawnPowerCapsules = 0;
@@ -969,6 +1214,9 @@
         crashing: false,
         crashVy: 0,
         crashSpin: 0,
+        crashTimer: 0,
+        crashStartY: 0,
+        crashSmokeTimer: 0,
         angle: 0,
         trail: [],
       });
@@ -988,6 +1236,9 @@
       this.player.crashing = false;
       this.player.crashVy = 0;
       this.player.crashSpin = 0;
+      this.player.crashTimer = 0;
+      this.player.crashStartY = 0;
+      this.player.crashSmokeTimer = 0;
       this.player.angle = 0;
       this.powerCapsules = this.respawnPowerCapsules;
       this.respawnPowerCapsules = 0;
@@ -995,29 +1246,74 @@
     }
 
     updateCrash(dt) {
-      this.player.crashVy += CRASH_GRAVITY * dt;
-      this.player.x = Math.max(34, this.player.x - 72 * dt);
-      this.player.y += this.player.crashVy * dt;
-      this.player.angle += this.player.crashSpin * dt;
+      this.player.crashTimer += dt;
+      this.player.crashSmokeTimer -= dt;
+      this.player.angle = -0.08;
 
-      const floor = this.terrainY(this.player.x) - 18;
-      if (this.player.y >= floor) {
-        this.player.y = floor;
-        this.addBurst(this.player.x, this.player.y, COLORS.cyan, 1.1);
-        this.addBurst(this.player.x + 16, this.player.y - 8, COLORS.amber, 0.72);
-        this.player.crashing = false;
-
-        if (this.lives <= 0) this.enterGameOver();
-        else {
-          this.mode = "respawn";
-          this.respawnTimer = 2;
-        }
+      if (this.player.crashSmokeTimer <= 0) {
+        this.player.crashSmokeTimer = 0.1;
+        this.addCrashSmoke();
       }
+
+      const stage = STAGES[this.stageIndex];
+      const spaceStage = Boolean(stage.spaceAssault || stage.meteorRush);
+      const targetY = spaceStage
+        ? Math.min(this.height - 105, this.player.crashStartY + this.height * 0.28)
+        : this.crashSurfaceY();
+      const progress = clamp(this.player.crashTimer / CRASH_DURATION, 0, 1);
+      const easedProgress = progress * progress;
+      this.player.y = this.player.crashStartY + (targetY - this.player.crashStartY) * easedProgress;
+
+      if (progress < 1) return;
+
+      this.player.y = targetY;
+      this.addBurst(this.player.x, this.player.y, COLORS.cyan, 1.1);
+      this.addBurst(this.player.x + 16, this.player.y - 8, COLORS.amber, 0.72);
+      this.addBurst(this.player.x - 12, this.player.y + 6, COLORS.red, 0.58);
+      this.player.crashing = false;
+
+      if (this.lives <= 0) this.enterGameOver();
+      else {
+        this.mode = "respawn";
+        this.respawnTimer = 2;
+      }
+    }
+
+    crashSurfaceY() {
+      const stage = STAGES[this.stageIndex];
+      if (stage.terrainMode === "normal" || stage.terrainMode === "inverted") {
+        return this.stageSurfaceY(this.player.x, "bottom") - 18;
+      }
+      return this.terrainY(this.player.x) - 18;
+    }
+
+    addCrashSmoke() {
+      this.smoke.push({
+        x: this.player.x - 18 + (Math.random() - 0.5) * 8,
+        y: this.player.y + (Math.random() - 0.5) * 8,
+        vx: -28 - Math.random() * 34,
+        vy: -16 - Math.random() * 28,
+        radius: 4 + Math.random() * 5,
+        age: 0,
+        life: 0.9 + Math.random() * 0.55,
+      });
+    }
+
+    updateSmoke(dt) {
+      for (const particle of this.smoke) {
+        particle.age += dt;
+        particle.x += particle.vx * dt;
+        particle.y += particle.vy * dt;
+        particle.radius += 9 * dt;
+        particle.vx *= 0.985;
+        particle.vy *= 0.985;
+      }
+      removeWhere(this.smoke, (particle) => particle.age >= particle.life);
     }
 
     updateGameOver(dt, input) {
       this.gameOverTimer += dt;
-      const startHeld = input.fire || input.activate;
+      const startHeld = input.start || input.fire || input.activate;
 
       if (!startHeld) this.gameOverCanConfirm = true;
       if ((startHeld && this.gameOverCanConfirm) || this.gameOverTimer >= 15) {
@@ -1033,7 +1329,7 @@
 
     updateLoopClear(dt, input) {
       this.loopClearTimer += dt;
-      const startHeld = input.fire || input.activate;
+      const startHeld = input.start || input.fire || input.activate;
       if ((startHeld && !this.startWasHeld) || this.loopClearTimer >= 15) {
         this.mode = "title";
         this.stageIndex = 0;
@@ -1068,9 +1364,14 @@
     }
 
     updateSpawns(dt) {
-      if (this.mode !== "playing" || this.stagePhase !== "main") return;
+      if (
+        (this.mode !== "playing" && this.mode !== "crashing") ||
+        this.stagePhase !== "main"
+      ) return;
       if (STAGES[this.stageIndex].sphereSpawner) return;
       if (STAGES[this.stageIndex].laserDrones) return;
+      if (STAGES[this.stageIndex].spaceAssault) return;
+      if (STAGES[this.stageIndex].meteorRush) return;
 
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) {
@@ -1107,7 +1408,43 @@
     }
 
     fireShotPattern(emitter) {
+      const emitterId = emitter.id ?? "player";
+      const emitterShots = this.playerShots.filter((shot) => shot.emitterId === emitterId);
+      const horizontalCount = emitterShots.filter((shot) => shot.shotKind === "horizontal").length;
+
+      if (this.player.double) {
+        const diagonalCount = emitterShots.filter((shot) => shot.shotKind === "diagonal").length;
+        if (horizontalCount < 2) {
+          this.playerShots.push({
+            emitterId,
+            shotKind: "horizontal",
+            x: emitter.x + 25,
+            y: emitter.y,
+            vx: 760,
+            vy: 0,
+            radius: 5,
+            age: 0,
+          });
+        }
+        if (diagonalCount < 2) {
+          this.playerShots.push({
+            emitterId,
+            shotKind: "diagonal",
+            x: emitter.x + 18,
+            y: emitter.y - 7,
+            vx: 610,
+            vy: -360,
+            radius: 5,
+            age: 0,
+          });
+        }
+        return;
+      }
+
+      if (horizontalCount >= 4) return;
       this.playerShots.push({
+        emitterId,
+        shotKind: "horizontal",
         x: emitter.x + 25,
         y: emitter.y,
         vx: 760,
@@ -1115,17 +1452,6 @@
         radius: 5,
         age: 0,
       });
-
-      if (this.player.double) {
-        this.playerShots.push({
-          x: emitter.x + 18,
-          y: emitter.y - 7,
-          vx: 610,
-          vy: -360,
-          radius: 5,
-          age: 0,
-        });
-      }
     }
 
     dropMissile(emitter) {
@@ -1265,6 +1591,26 @@
           continue;
         }
 
+        if (enemy.type === "spaceFighter") {
+          this.updateSpaceFighter(enemy, dt);
+          continue;
+        }
+
+        if (enemy.type === "spaceCruiser") {
+          this.updateSpaceCruiser(enemy, dt);
+          continue;
+        }
+
+        if (enemy.type === "meteor") {
+          this.updateMeteorEnemy(enemy, dt);
+          continue;
+        }
+
+        if (enemy.type === "meteorRaider") {
+          this.updateMeteorRaider(enemy, dt);
+          continue;
+        }
+
         if (enemy.type === "volcanoRock") {
           this.updateVolcanoRock(enemy, dt);
           continue;
@@ -1279,7 +1625,10 @@
         enemy.y += Math.sin(this.time * 2.3 + enemy.phase) * 42 * dt;
         enemy.fireTimer -= dt;
 
-        if (enemy.fireTimer <= 0 && this.mode === "playing") {
+        if (
+          enemy.fireTimer <= 0 &&
+          (this.mode === "playing" || this.mode === "crashing")
+        ) {
           enemy.fireTimer = 2.5 - d * 1.45 + Math.random() * (1.25 - d * 0.45);
           if (Math.random() > 0.35 + d * 0.65) continue;
 
@@ -1312,6 +1661,35 @@
       enemy.y += enemy.vy * dt;
       enemy.vy += enemy.ay * dt;
       enemy.spin += dt * 8;
+    }
+
+    updateMeteorEnemy(enemy, dt) {
+      enemy.x += enemy.vx * dt;
+      enemy.y += enemy.vy * dt;
+      enemy.spin += enemy.spinSpeed * dt;
+    }
+
+    updateMeteorRaider(enemy, dt) {
+      enemy.x += enemy.vx * dt;
+      enemy.fireTimer -= dt;
+      if (
+        enemy.fireTimer > 0 ||
+        (this.mode !== "playing" && this.mode !== "crashing")
+      ) return;
+
+      enemy.fireTimer = enemy.shotInterval;
+      const targetX = this.player.x - (enemy.aimBehind ? 72 : 0);
+      const dx = targetX - enemy.x;
+      const dy = this.player.y - enemy.y;
+      const length = Math.hypot(dx, dy) || 1;
+      this.souls.push({
+        x: enemy.x - 16,
+        y: enemy.y,
+        vx: (dx / length) * 142.5,
+        vy: (dy / length) * 142.5,
+        radius: 9,
+        spin: Math.random() * TAU,
+      });
     }
 
     updateSphereEnemy(enemy, dt) {
@@ -1512,17 +1890,23 @@
 
     updateLaserDroneEnemy(enemy, dt) {
       enemy.x += enemy.vx * dt;
-      enemy.y += Math.sin(this.time * 3 + enemy.phase) * 14 * dt;
       if (enemy.burstPause > 0) {
+        enemy.y += Math.sin(this.time * 3 + enemy.phase) * 14 * dt;
         enemy.burstPause -= dt;
         if (enemy.burstPause <= 0) enemy.fireTimer = 0;
         return;
       }
 
+      if (enemy.burstShots === 0) {
+        enemy.y += Math.sin(this.time * 3 + enemy.phase) * 14 * dt;
+      }
       enemy.fireTimer -= dt;
-      if (enemy.fireTimer > 0 || this.mode !== "playing") return;
+      if (
+        enemy.fireTimer > 0 ||
+        (this.mode !== "playing" && this.mode !== "crashing")
+      ) return;
 
-      enemy.fireTimer = 0.18;
+      enemy.fireTimer = 0.36;
       enemy.burstShots += 1;
       this.bossBeams.push({
         type: "enemyLaser",
@@ -1544,6 +1928,134 @@
         enemy.burstPause = 0.72;
         enemy.fireTimer = 0;
       }
+    }
+
+    updateSpaceFighter(enemy, dt) {
+      const direction = enemy.side === "top" ? 1 : -1;
+      if (enemy.state === "enter") {
+        const progress = clamp(
+          (this.time - enemy.waveStartTime) / enemy.enterDuration,
+          0,
+          1,
+        );
+        enemy.y = enemy.startY + (enemy.targetY - enemy.startY) * progress;
+        if (progress >= 1) {
+          enemy.y = enemy.targetY;
+          enemy.state = "hold";
+        }
+        return;
+      }
+
+      if (enemy.state === "hold") {
+        if (!enemy.fired && this.time >= enemy.fireAt) {
+          enemy.fired = true;
+          this.fireSpaceFighterSpread(enemy);
+        }
+        if (this.time >= enemy.exitAt) enemy.state = "exit";
+        return;
+      }
+
+      enemy.y += direction * 420 * dt;
+    }
+
+    fireSpaceFighterSpread(enemy) {
+      const aim = Math.atan2(this.player.y - enemy.y, this.player.x - enemy.x);
+      const spreadDegrees = (this.spaceAssault?.loopIndex ?? 0) >= 1 ? 15 : 20;
+      const spreadAngle = (spreadDegrees * Math.PI) / 180;
+      for (const offset of [-spreadAngle, 0, spreadAngle]) {
+        const angle = aim + offset;
+        this.souls.push({
+          x: enemy.x,
+          y: enemy.y,
+          vx: Math.cos(angle) * 230,
+          vy: Math.sin(angle) * 230,
+          radius: 9,
+          spin: Math.random() * TAU,
+        });
+      }
+    }
+
+    updateSpaceCruiser(enemy, dt) {
+      enemy.phase += dt;
+      if (enemy.state === "enter") {
+        enemy.x -= 145 * dt;
+        if (enemy.x <= enemy.targetX) {
+          enemy.x = enemy.targetX;
+          enemy.state = "ready";
+        }
+        return;
+      }
+
+      if (enemy.state === "exit") {
+        enemy.x -= 185 * dt;
+        return;
+      }
+
+      if (enemy.state === "laserTravel") {
+        const volleyActive = this.bossBeams.some(
+          (beam) => beam.volleyId === enemy.activeVolley,
+        );
+        if (!volleyActive) {
+          if (enemy.exitAfterVolley) {
+            enemy.state = "exit";
+            return;
+          }
+          const nextY = clamp(enemy.y + enemy.moveDirection * 115, 115, this.height - 155);
+          if (nextY === enemy.y) enemy.moveDirection *= -1;
+          enemy.targetY = clamp(enemy.y + enemy.moveDirection * 115, 115, this.height - 155);
+          enemy.moveDirection *= -1;
+          enemy.state = "reposition";
+        }
+        return;
+      }
+
+      if (enemy.state === "reposition") {
+        const delta = enemy.targetY - enemy.y;
+        enemy.y += Math.sign(delta) * 125 * dt;
+        if (Math.abs(delta) <= 5) {
+          enemy.y = enemy.targetY;
+          enemy.state = "ready";
+          enemy.fireTimer = STAGES[this.stageIndex].spaceAssault?.mediumLaserInterval ?? 1.55;
+        }
+        return;
+      }
+
+      enemy.fireTimer -= dt;
+      if (enemy.fireTimer > 0) return;
+
+      enemy.laserCount += 1;
+      this.fireSpaceCruiserLasers(enemy);
+      if (enemy.laserCount >= 6) {
+        enemy.exitAfterVolley = true;
+        enemy.state = "laserTravel";
+        return;
+      }
+      enemy.state = "laserTravel";
+    }
+
+    fireSpaceCruiserLasers(enemy) {
+      const offsets = [-54, -18, 18, 54];
+      const volleyId = `cruiser-${enemy.cruiserId}-volley-${enemy.laserCount}`;
+      enemy.activeVolley = volleyId;
+      offsets.forEach((offset, index) => {
+        const outer = index === 0 || index === offsets.length - 1;
+        this.bossBeams.push({
+          type: "cruiserLaser",
+          volleyId,
+          x: enemy.x - 42,
+          y: enemy.y + offset,
+          length: 0,
+          maxLength: this.width * 0.3,
+          growSpeed: this.width * 1.8,
+          vx: -420,
+          vy: 0,
+          radius: 7,
+          age: 0,
+          life: Infinity,
+          delay: outer ? 0.22 : 0,
+          hitTimer: 0,
+        });
+      });
     }
 
     updateFormationEnemy(enemy, dt) {
@@ -1597,7 +2109,11 @@
 
       enemy.stopTimer -= dt;
       enemy.laserTimer -= dt;
-      if (!enemy.laserFired && enemy.laserTimer <= 0 && this.mode === "playing") {
+      if (
+        !enemy.laserFired &&
+        enemy.laserTimer <= 0 &&
+        (this.mode === "playing" || this.mode === "crashing")
+      ) {
         enemy.laserFired = true;
         this.fireBossLasers(enemy);
       }
@@ -1630,6 +2146,10 @@
 
     updateBossBeams(dt) {
       for (const beam of this.bossBeams) {
+        if (beam.delay > 0) {
+          beam.delay -= dt;
+          continue;
+        }
         beam.age += dt;
         beam.x += beam.vx * dt;
         beam.y += (beam.vy ?? 0) * dt;
@@ -1731,7 +2251,11 @@
     }
 
     capsuleScrollSpeed() {
-      if (this.mode === "playing" && this.stagePhase === "main" && STAGES[this.stageIndex].terrainMode) return 92;
+      if (
+        (this.mode === "playing" || this.mode === "crashing") &&
+        this.stagePhase === "main" &&
+        STAGES[this.stageIndex].terrainMode
+      ) return 92;
       return 125;
     }
 
@@ -1760,18 +2284,35 @@
           this.player.shield = Math.max(0, this.player.shield - 3);
           this.hitEnemy(enemy, enemy.type === "boss" ? 3 : 1);
           this.addBurst(enemy.x, enemy.y, COLORS.blue);
-        } else if (!enemy.dead && this.player.invincible <= 0 && distance(enemy, this.player) < enemy.radius + this.player.radius) {
-          enemy.dead = true;
+        } else if (
+          !enemy.dead &&
+          this.player.invincible <= 0 &&
+          distance(enemy, this.player) < enemy.radius + this.player.hitRadius
+        ) {
+          if (enemy.type !== "meteor") enemy.dead = true;
           this.damagePlayer();
         }
       }
 
       for (const soul of this.souls) {
+        const blockingMeteor = this.enemies.find(
+          (enemy) =>
+            enemy.type === "meteor" &&
+            distance(soul, enemy) < soul.radius + enemy.radius,
+        );
+        if (blockingMeteor) {
+          soul.dead = true;
+          continue;
+        }
+
         if (this.player.shield > 0 && this.hitShield(soul)) {
           soul.dead = true;
           this.player.shield = Math.max(0, this.player.shield - 1);
           this.addBurst(soul.x, soul.y, COLORS.blue);
-        } else if (this.player.invincible <= 0 && distance(soul, this.player) < soul.radius + this.player.radius * 0.75) {
+        } else if (
+          this.player.invincible <= 0 &&
+          distance(soul, this.player) < soul.radius + this.player.hitRadius
+        ) {
           soul.dead = true;
           this.damagePlayer();
         }
@@ -1794,7 +2335,10 @@
           shot.dead = true;
           this.player.shield = Math.max(0, this.player.shield - 1);
           this.addBurst(shot.x, shot.y, COLORS.amber);
-        } else if (this.player.invincible <= 0 && distance(shot, this.player) < shot.radius + this.player.radius * 0.75) {
+        } else if (
+          this.player.invincible <= 0 &&
+          distance(shot, this.player) < shot.radius + this.player.hitRadius
+        ) {
           shot.dead = true;
           this.damagePlayer();
         }
@@ -1824,6 +2368,7 @@
     }
 
     bossBeamHitsPlayer(beam) {
+      if (beam.delay > 0) return false;
       const velocityLength = Math.hypot(beam.vx, beam.vy ?? 0) || 1;
       const ux = beam.vx / velocityLength;
       const uy = (beam.vy ?? 0) / velocityLength;
@@ -1834,7 +2379,7 @@
       const nearestY = beam.y + uy * along;
       const dx = this.player.x - nearestX;
       const dy = this.player.y - nearestY;
-      return Math.hypot(dx, dy) < this.player.radius * 0.75 + beam.radius;
+      return Math.hypot(dx, dy) < this.player.hitRadius + beam.radius;
     }
 
     enemyIntersectsPoint(enemy, x, y, radius = 0) {
@@ -1860,8 +2405,16 @@
     hitEnemy(enemy, damage, projectile) {
       if (enemy.dead) return;
       if (projectile) projectile.dead = true;
+      if (enemy.type === "meteor") return;
 
-      if (enemy.type !== "boss" && enemy.type !== "sphere" && enemy.type !== "volcanoRock" && enemy.type !== "generatorCore") {
+      if (
+        enemy.type !== "boss" &&
+        enemy.type !== "sphere" &&
+        enemy.type !== "volcanoRock" &&
+        enemy.type !== "generatorCore" &&
+        enemy.type !== "spaceCruiser" &&
+        enemy.type !== "meteor"
+      ) {
         this.killEnemy(enemy);
         return;
       }
@@ -1960,6 +2513,7 @@
         this.player.double = true;
         this.player.laser = false;
         this.lasers.length = 0;
+        this.playerShots.length = 0;
       }
       if (name === "LASER") {
         this.player.laser = true;
@@ -1990,23 +2544,20 @@
       this.lives -= 1;
       this.clearPowerups();
       this.respawnPowerCapsules = carriedCapsule && this.lives > 0 ? 1 : 0;
-      this.enemies.length = 0;
-      this.souls.length = 0;
-      this.bossBeams.length = 0;
-      this.volcanoShots.length = 0;
-      this.capsules.length = 0;
       this.playerShots.length = 0;
       this.missiles.length = 0;
       this.lasers.length = 0;
-      if (this.stagePhase === "boss") this.bossSpawned = false;
       this.mode = "crashing";
       this.player.invincible = 999;
       this.player.trail = [];
       this.player.moving = false;
       this.player.crashing = true;
-      this.player.crashVy = 42;
-      this.player.crashSpin = 4.4;
-      this.player.angle = -0.25;
+      this.player.crashVy = 0;
+      this.player.crashSpin = 0;
+      this.player.crashTimer = 0;
+      this.player.crashStartY = this.player.y;
+      this.player.crashSmokeTimer = 0;
+      this.player.angle = -0.08;
       this.flash("CRITICAL HIT");
     }
 
@@ -2068,6 +2619,7 @@
         this.drawStars(state.stars, state.time);
       });
       this.drawTerrain(state);
+      for (const particle of state.smoke) this.drawSmoke(particle);
 
       if (state.mode === "title") {
         this.drawTitle(state);
@@ -2142,6 +2694,7 @@
       const { width, height, time, mode, stagePhase, stage, stageScroll } = state;
       const ctx = this.ctx;
       if (mode === "playing" && stagePhase === "air") return;
+      if (stage?.spaceAssault || stage?.meteorRush) return;
       if (stage?.terrainMode) {
         this.drawStageTerrain(state);
         return;
@@ -2494,23 +3047,46 @@
 
     drawPlayerShot(shot) {
       const ctx = this.ctx;
+      const speed = Math.hypot(shot.vx, shot.vy) || 1;
+      const ux = shot.vx / speed;
+      const uy = shot.vy / speed;
       ctx.strokeStyle = COLORS.lime;
       ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.moveTo(shot.x - 18, shot.y);
-      ctx.lineTo(shot.x + 16, shot.y);
+      ctx.moveTo(shot.x - ux * 18, shot.y - uy * 18);
+      ctx.lineTo(shot.x + ux * 16, shot.y + uy * 16);
       ctx.stroke();
     }
 
     drawMissile(missile) {
       const ctx = this.ctx;
+      const angle = missile.grounded ? 0 : Math.atan2(missile.vy, missile.vx);
+      ctx.save();
+      ctx.translate(missile.x, missile.y);
+      ctx.rotate(angle);
       ctx.strokeStyle = COLORS.amber;
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(missile.x - 10, missile.y - 5);
-      ctx.lineTo(missile.x + 12, missile.y);
-      ctx.lineTo(missile.x - 10, missile.y + 5);
+      ctx.moveTo(-10, -5);
+      ctx.lineTo(12, 0);
+      ctx.lineTo(-10, 5);
       ctx.stroke();
+      ctx.restore();
+    }
+
+    drawSmoke(particle) {
+      const ctx = this.ctx;
+      const progress = particle.age / particle.life;
+      ctx.save();
+      ctx.globalAlpha = (1 - progress) * 0.58;
+      ctx.fillStyle = "rgba(125, 138, 150, 0.62)";
+      ctx.strokeStyle = "rgba(185, 198, 210, 0.48)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(particle.x, particle.y, particle.radius, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
 
     drawLaser(laser, time) {
@@ -2531,6 +3107,7 @@
     }
 
     drawBossBeam(beam, time) {
+      if (beam.delay > 0) return;
       const ctx = this.ctx;
       const pulse = 7 + Math.sin(time * 42 + beam.y * 0.05) * 2;
       ctx.strokeStyle = COLORS.red;
@@ -2552,6 +3129,26 @@
     }
 
     drawEnemy(enemy, time) {
+      if (enemy.type === "meteor") {
+        this.drawMeteorEnemy(enemy);
+        return;
+      }
+
+      if (enemy.type === "meteorRaider") {
+        this.drawMeteorRaider(enemy, time);
+        return;
+      }
+
+      if (enemy.type === "spaceFighter") {
+        this.drawSpaceFighter(enemy, time);
+        return;
+      }
+
+      if (enemy.type === "spaceCruiser") {
+        this.drawSpaceCruiser(enemy, time);
+        return;
+      }
+
       if (enemy.type === "generatorCore") {
         this.drawGeneratorCore(enemy);
         return;
@@ -2605,6 +3202,110 @@
         ctx.lineTo(enemy.x - 58 + 116 * ratio, enemy.y + 88);
         ctx.stroke();
       }
+    }
+
+    drawMeteorEnemy(enemy) {
+      const ctx = this.ctx;
+      const radius = enemy.radius;
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y);
+      ctx.rotate(enemy.spin);
+      ctx.strokeStyle = COLORS.amber;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      for (let index = 0; index < 9; index += 1) {
+        const angle = (TAU * index) / 9;
+        const edge = radius * (0.78 + (index % 3) * 0.1);
+        const x = Math.cos(angle) * edge;
+        const y = Math.sin(angle) * edge;
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.strokeStyle = COLORS.red;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(-radius * 0.18, -radius * 0.12, radius * 0.22, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    drawMeteorRaider(enemy, time) {
+      const ctx = this.ctx;
+      ctx.strokeStyle = COLORS.pink;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - 23, enemy.y);
+      ctx.lineTo(enemy.x + 17, enemy.y - 14);
+      ctx.lineTo(enemy.x + 8, enemy.y);
+      ctx.lineTo(enemy.x + 17, enemy.y + 14);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.strokeStyle = COLORS.red;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x + 14, enemy.y - 7);
+      ctx.lineTo(enemy.x + 28 + Math.sin(time * 30 + enemy.phase) * 5, enemy.y);
+      ctx.lineTo(enemy.x + 14, enemy.y + 7);
+      ctx.stroke();
+    }
+
+    drawSpaceFighter(enemy, time) {
+      const ctx = this.ctx;
+      const direction = enemy.side === "top" ? 1 : -1;
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y);
+      ctx.rotate(direction > 0 ? Math.PI / 2 : -Math.PI / 2);
+      ctx.strokeStyle = COLORS.pink;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(22, 0);
+      ctx.lineTo(-14, -14);
+      ctx.lineTo(-7, 0);
+      ctx.lineTo(-14, 14);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.strokeStyle = COLORS.red;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-10, -8);
+      ctx.lineTo(-22 - Math.sin(time * 24 + enemy.phase) * 4, 0);
+      ctx.lineTo(-10, 8);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    drawSpaceCruiser(enemy, time) {
+      const ctx = this.ctx;
+      const pulse = Math.sin(time * 5) * 4;
+      ctx.strokeStyle = COLORS.pink;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - 52, enemy.y);
+      ctx.lineTo(enemy.x - 18, enemy.y - 58 - pulse);
+      ctx.lineTo(enemy.x + 44, enemy.y - 34);
+      ctx.lineTo(enemy.x + 64, enemy.y);
+      ctx.lineTo(enemy.x + 44, enemy.y + 34);
+      ctx.lineTo(enemy.x - 18, enemy.y + 58 + pulse);
+      ctx.closePath();
+      ctx.stroke();
+
+      ctx.strokeStyle = COLORS.red;
+      ctx.lineWidth = 3;
+      for (const offset of [-54, -18, 18, 54]) {
+        ctx.beginPath();
+        ctx.arc(enemy.x - 38, enemy.y + offset, 6, 0, TAU);
+        ctx.stroke();
+      }
+
+      const ratio = Math.max(0, enemy.hp / enemy.maxHp);
+      ctx.strokeStyle = COLORS.lime;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - 54, enemy.y + 74);
+      ctx.lineTo(enemy.x - 54 + 108 * ratio, enemy.y + 74);
+      ctx.stroke();
     }
 
     drawGeneratorCore(enemy) {
@@ -2779,16 +3480,16 @@
         const active = state.powerCapsules === index + 1;
         const available = state.powerupAvailable[index];
         const cx = x + index * (cell + gap);
+        ctx.shadowColor = active ? COLORS.lime : "rgba(0, 0, 0, 0)";
+        ctx.shadowBlur = active ? 12 : 0;
         ctx.fillStyle = active ? "rgba(185, 255, 120, 0.22)" : "rgba(2, 3, 10, 0.72)";
         ctx.strokeStyle = active ? COLORS.lime : "rgba(117, 247, 255, 0.48)";
         ctx.lineWidth = active ? 3 : 1;
         ctx.fillRect(cx, y, cell, height);
         ctx.strokeRect(cx, y, cell, height);
-        if (!available) continue;
 
+        if (!available) continue;
         ctx.fillStyle = active ? COLORS.lime : "rgba(117, 247, 255, 0.55)";
-        ctx.shadowColor = ctx.fillStyle;
-        ctx.shadowBlur = active ? 12 : 0;
         ctx.fillText(state.powerups[index], cx + cell / 2, y + height / 2);
       }
       ctx.restore();

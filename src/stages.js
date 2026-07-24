@@ -274,8 +274,45 @@ window.VECTORIUS_STAGE_DATA = [
       { delay: 108, side: "bottom" },
     ],
   },
-  { id: 5, name: "STAGE 5", theme: "vector-space" },
+  {
+    id: 5,
+    name: "STAGE 5",
+    theme: "meteor-rush",
+    meteorRush: {
+      meteorInterval: 0.72,
+      enemyInterval: 0.5,
+      finalEnemyInterval: 0.2,
+      finalDuration: 25,
+    },
+  },
   { id: 6, name: "STAGE 6", theme: "vector-space" },
   { id: 7, name: "STAGE 7", theme: "vector-space" },
   { id: 8, name: "STAGE 8", theme: "vector-space" },
 ];
+
+const crystalStage = window.VECTORIUS_STAGE_DATA[2];
+const meteorStage = window.VECTORIUS_STAGE_DATA[4];
+window.VECTORIUS_STAGE_DATA[2] = {
+  id: 3,
+  name: "STAGE 3",
+  theme: "space-assault",
+  spaceAssault: {
+    waveInterval: 1.65,
+    wavePattern: ["top", "bottom", "top", "bottom", "top", "bottom", "bottom", "top"],
+    smallGroupsPerLoop: 16,
+    mediumCountPerLoop: 4,
+    mediumSpawnInterval: 6,
+    loopCount: 2,
+    mediumLaserInterval: 1.55,
+  },
+};
+window.VECTORIUS_STAGE_DATA[4] = {
+  ...crystalStage,
+  id: 5,
+  name: "STAGE 5",
+};
+window.VECTORIUS_STAGE_DATA[5] = {
+  ...meteorStage,
+  id: 6,
+  name: "STAGE 6",
+};
