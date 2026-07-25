@@ -190,6 +190,7 @@
       this.sphereTimer = 0;
       this.sphereSpawnCount = 0;
       this.generatorStates = [];
+      this.groundTurretStates = [];
       this.walkerStates = [];
       this.jumperStates = [];
       this.laserDroneStates = [];
@@ -613,6 +614,12 @@
         coreSpawned: false,
         coreDead: false,
       }));
+      this.groundTurretStates = (stage.groundTurrets ?? []).map((turret, index) => ({
+        ...turret,
+        id: turret.id ?? `ground-turret-${index}-${turret.x}-${turret.side}`,
+        spawned: false,
+        dead: false,
+      }));
       this.walkerStates = (stage.walkers ?? []).map((walker) => ({
         ...walker,
         spawned: false,
@@ -676,6 +683,7 @@
         formationsLaunched: phase === "air" ? 0 : this.formationsLaunched,
         formationTimer: phase === "air" ? 0 : this.formationTimer,
         generatorStates: cloneState(this.generatorStates),
+        groundTurretStates: cloneState(this.groundTurretStates),
         walkerStates: cloneState(this.walkerStates),
         jumperStates: cloneState(this.jumperStates),
         laserDroneStates: cloneState(this.laserDroneStates),
@@ -704,6 +712,7 @@
       this.formationsLaunched = checkpoint.formationsLaunched;
       this.formationTimer = checkpoint.formationTimer;
       this.generatorStates = cloneState(checkpoint.generatorStates);
+      this.groundTurretStates = cloneState(checkpoint.groundTurretStates);
       this.walkerStates = cloneState(checkpoint.walkerStates);
       this.jumperStates = cloneState(checkpoint.jumperStates);
       this.laserDroneStates = cloneState(checkpoint.laserDroneStates);
@@ -724,6 +733,7 @@
           !stage.sphereSpawner &&
           !stage.jumpers &&
           !stage.laserDrones &&
+          !stage.groundTurrets &&
           !stage.spaceAssault &&
           !stage.meteorRush
         )
@@ -734,6 +744,7 @@
       this.updateMeteorRush(dt, stage);
       this.updateVolcano(dt, stage);
       this.updateGenerators(dt);
+      this.updateGroundTurretSpawns();
       this.updateWalkerSpawns();
       this.updateJumperSpawns();
       this.updateLaserDroneSpawns();
@@ -1018,6 +1029,30 @@
           generator.bursts += 1;
           generator.spawnTimer = 1.2;
         }
+      }
+    }
+
+    updateGroundTurretSpawns() {
+      for (const turret of this.groundTurretStates) {
+        if (turret.spawned || turret.dead) continue;
+        const x = turret.x - this.stageScroll;
+        if (x < -90 || x > this.width + 90) continue;
+
+        turret.spawned = true;
+        this.enemies.push({
+          type: "groundTurret",
+          turretId: turret.id,
+          anchorX: turret.x,
+          side: turret.side,
+          x,
+          y: this.stageSurfaceY(x, turret.side),
+          radius: 21,
+          hp: 6,
+          maxHp: 6,
+          fireTimer: 0.75 + Math.random() * 0.45,
+          phase: Math.random() * TAU,
+          scoreValue: 240,
+        });
       }
     }
 
@@ -1773,6 +1808,11 @@
           continue;
         }
 
+        if (enemy.type === "groundTurret") {
+          this.updateGroundTurretEnemy(enemy, dt);
+          continue;
+        }
+
         if (enemy.type === "walker") {
           this.updateWalkerEnemy(enemy, dt);
           continue;
@@ -2003,6 +2043,37 @@
       if (enemy.x < -150 || enemy.x > this.width + 150) enemy.dead = true;
     }
 
+    updateGroundTurretEnemy(enemy, dt) {
+      const turret = this.groundTurretStates.find((item) => item.id === enemy.turretId);
+      if (!turret || turret.dead) {
+        enemy.dead = true;
+        return;
+      }
+
+      enemy.x = enemy.anchorX - this.stageScroll;
+      enemy.y = this.stageSurfaceY(enemy.x, enemy.side);
+      enemy.fireTimer -= dt;
+      if (
+        enemy.fireTimer <= 0 &&
+        (this.mode === "playing" || this.mode === "crashing")
+      ) {
+        enemy.fireTimer = 1.35;
+        const muzzleY = enemy.y + (enemy.side === "top" ? 18 : -18);
+        const dx = this.player.x - enemy.x;
+        const dy = this.player.y - muzzleY;
+        const length = Math.hypot(dx, dy) || 1;
+        this.souls.push({
+          x: enemy.x,
+          y: muzzleY,
+          vx: (dx / length) * 205,
+          vy: (dy / length) * 205,
+          radius: 10,
+          spin: Math.random() * TAU,
+        });
+      }
+      if (enemy.x < -120 || enemy.x > this.width + 140) enemy.dead = true;
+    }
+
     updateWalkerEnemy(enemy, dt) {
       enemy.y += (this.stageSurfaceY(enemy.x, enemy.side) - enemy.y) * 0.55;
 
@@ -2141,6 +2212,7 @@
       ) return;
 
       enemy.fireTimer = 0.36;
+      if (this.laserDroneOverlapsReflectiveTerrain(enemy)) return;
       enemy.burstShots += 1;
       this.bossBeams.push({
         type: "enemyLaser",
@@ -2162,6 +2234,15 @@
         enemy.burstPause = 0.72;
         enemy.fireTimer = 0;
       }
+    }
+
+    laserDroneOverlapsReflectiveTerrain(enemy) {
+      if (STAGES[this.stageIndex].terrainMode !== "diamonds") return false;
+      const emitterX = enemy.x - 18;
+      return (
+        this.pointHitsDiamondTerrain(emitterX, enemy.y, enemy.radius) ||
+        this.pointHitsCircleTerrain(emitterX, enemy.y, enemy.radius)
+      );
     }
 
     updateSpaceFighter(enemy, dt) {
@@ -2671,6 +2752,7 @@
         enemy.type !== "sphere" &&
         enemy.type !== "volcanoRock" &&
         enemy.type !== "generatorCore" &&
+        enemy.type !== "groundTurret" &&
         enemy.type !== "spaceCruiser" &&
         enemy.type !== "meteor"
       ) {
@@ -2714,6 +2796,13 @@
       if (enemy.type === "generatorCore") {
         const generator = this.generatorStates.find((item) => item.id === enemy.generatorId);
         if (generator) generator.coreDead = true;
+        return;
+      }
+
+      if (enemy.type === "groundTurret") {
+        const turret = this.groundTurretStates.find((item) => item.id === enemy.turretId);
+        if (turret) turret.dead = true;
+        this.killCount += 1;
         return;
       }
 
@@ -3461,6 +3550,11 @@
         return;
       }
 
+      if (enemy.type === "groundTurret") {
+        this.drawGroundTurret(enemy, time);
+        return;
+      }
+
       if (enemy.type === "sphere") {
         this.drawSphereEnemy(enemy);
         return;
@@ -3697,6 +3791,34 @@
       ctx.beginPath();
       ctx.moveTo(enemy.x - halfWidth, enemy.y + 26);
       ctx.lineTo(enemy.x - halfWidth + halfWidth * 2 * ratio, enemy.y + 26);
+      ctx.stroke();
+    }
+
+    drawGroundTurret(enemy, time) {
+      const ctx = this.ctx;
+      const direction = enemy.side === "top" ? 1 : -1;
+      const bodyY = enemy.y + direction * 17;
+      const ratio = Math.max(0, enemy.hp / enemy.maxHp);
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - 22, enemy.y);
+      ctx.lineTo(enemy.x - 16, bodyY);
+      ctx.lineTo(enemy.x + 16, bodyY);
+      ctx.lineTo(enemy.x + 22, enemy.y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.strokeStyle = COLORS.amber;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x, bodyY);
+      ctx.lineTo(enemy.x - 18, bodyY + direction * 24);
+      ctx.stroke();
+      ctx.strokeStyle = COLORS.lime;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - 18, bodyY + direction * 34);
+      ctx.lineTo(enemy.x - 18 + 36 * ratio, bodyY + direction * 34);
       ctx.stroke();
     }
 

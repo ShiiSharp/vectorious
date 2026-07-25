@@ -35,6 +35,12 @@ window.VECTORIUS_STAGE_DATA = [
       { x: 2740, side: "bottom" },
       { x: 6020, side: "top" },
     ],
+    groundTurrets: [
+      { x: 2520, side: "bottom" },
+      { x: 2960, side: "bottom" },
+      { x: 5800, side: "top" },
+      { x: 6240, side: "top" },
+    ],
     walkers: [
       { x: -120, delay: 42, side: "bottom" },
       { x: -120, delay: 82, side: "bottom" },
@@ -261,6 +267,12 @@ window.VECTORIUS_STAGE_DATA = [
     generators: [
       { x: 2740, side: "top" },
       { x: 6020, side: "bottom" },
+    ],
+    groundTurrets: [
+      { x: 2520, side: "top" },
+      { x: 2960, side: "top" },
+      { x: 5800, side: "bottom" },
+      { x: 6240, side: "bottom" },
     ],
     walkers: [
       { x: -120, delay: 42, side: "top" },
