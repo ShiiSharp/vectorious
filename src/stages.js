@@ -287,7 +287,6 @@ window.VECTORIUS_STAGE_DATA = [
   },
   { id: 6, name: "STAGE 6", theme: "vector-space" },
   { id: 7, name: "STAGE 7", theme: "vector-space" },
-  { id: 8, name: "STAGE 8", theme: "vector-space" },
 ];
 
 const crystalStage = window.VECTORIUS_STAGE_DATA[2];

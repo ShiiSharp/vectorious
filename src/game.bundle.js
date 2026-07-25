@@ -19,7 +19,6 @@
     ["Digit5", "stage5"],
     ["Digit6", "stage6"],
     ["Digit7", "stage7"],
-    ["Digit8", "stage8"],
     ["Numpad1", "stage1"],
     ["Numpad2", "stage2"],
     ["Numpad3", "stage3"],
@@ -27,7 +26,6 @@
     ["Numpad5", "stage5"],
     ["Numpad6", "stage6"],
     ["Numpad7", "stage7"],
-    ["Numpad8", "stage8"],
   ]);
 
   const POWERUPS = ["SPEED", "MISSILE", "DOUBLE", "LASER", "OPTION", "SHIELD"];
@@ -51,7 +49,7 @@
     dim: "rgba(117, 247, 255, 0.22)",
   };
 
-  const DEFAULT_STAGES = Array.from({ length: 8 }, (_, index) => ({
+  const DEFAULT_STAGES = Array.from({ length: 7 }, (_, index) => ({
     id: index + 1,
     name: `STAGE ${index + 1}`,
     theme: "vector-space",
@@ -83,7 +81,7 @@
       };
 
       window.addEventListener("keydown", (event) => {
-        if (/^[1-8]$/.test(event.key)) {
+        if (/^[1-7]$/.test(event.key)) {
           event.preventDefault();
           this.stageSelectLatch = Number(event.key);
           this.usingGamepad = false;
@@ -197,6 +195,7 @@
       this.spaceAssault = null;
       this.meteorRush = null;
       this.loopClearTimer = 0;
+      this.loopNumber = 1;
       this.killCount = 0;
       this.powerCapsules = 0;
       this.flashText = "";
@@ -207,6 +206,9 @@
       this.gameOverCanConfirm = false;
       this.respawnTimer = 0;
       this.respawnPowerCapsules = 0;
+      this.readyTimer = 0;
+      this.crashExplosionTimer = 0;
+      this.stageCheckpoint = null;
       this.player = {
         x: 150,
         y: height * 0.5,
@@ -245,6 +247,15 @@
     }
 
     update(dt, input) {
+      if (this.mode === "ready") {
+        this.updateReady(dt);
+        return;
+      }
+      if (this.mode === "crashExplosion") {
+        this.updateCrashExplosion(dt);
+        return;
+      }
+
       this.time += dt;
       this.flashTimer = Math.max(0, this.flashTimer - dt);
       this.updateStars(dt);
@@ -300,6 +311,7 @@
       this.runTime += dt;
       this.updateStageFlow(dt);
       this.updateStageObjects(dt);
+      this.updateStageCheckpoint();
       this.updatePlayer(dt, input);
       this.updateOptions();
       this.updateSpawns(dt);
@@ -318,7 +330,9 @@
       if (this.mode === "gameover") return "GAME OVER";
       if (this.mode === "loopclear") return "1 LOOP CLEAR";
       if (this.mode === "crashing") return "CRITICAL HIT";
+      if (this.mode === "crashExplosion") return "CRITICAL HIT";
       if (this.mode === "respawn") return "READY";
+      if (this.mode === "ready") return "READY";
       if (this.lives <= 0) return "SYSTEM REBOOTING";
       if (this.flashTimer > 0) return this.flashText;
       if (this.stagePhase === "bossClear") return "BOSS DOWN";
@@ -358,6 +372,8 @@
         stageScroll: this.stageScroll,
         terrainAlpha: this.terrainFadeAlpha(),
         loopClearTimer: this.loopClearTimer,
+        loopNumber: this.loopNumber,
+        readyTimer: this.readyTimer,
       };
     }
 
@@ -470,6 +486,10 @@
       return clamp(this.runTime / 120, 0, 1);
     }
 
+    loopDifficultyMultiplier() {
+      return 1 + Math.min(0.15 * (this.loopNumber - 1), 0.75);
+    }
+
     updateStageFlow(dt) {
       if (this.mode !== "playing") return;
 
@@ -516,6 +536,10 @@
         this.formationsLaunched = 0;
         this.formationGroups.clear();
         this.resetStageObjects();
+        this.saveStageCheckpoint(0, "air");
+      }
+      if (phase === "main") {
+        this.saveStageCheckpoint(0, "main");
       }
       if (phase === "boss") {
         this.enemies.length = 0;
@@ -571,6 +595,72 @@
         : null;
       this.bossBeams.length = 0;
       this.volcanoShots.length = 0;
+    }
+
+    updateStageCheckpoint() {
+      if (this.mode !== "playing" || this.stagePhase !== "main") return;
+      const quarterDuration = MAIN_DURATION / 4;
+      const checkpointTime = Math.floor(this.phaseTimer / quarterDuration) * quarterDuration;
+      if (checkpointTime <= 0 || checkpointTime >= MAIN_DURATION) return;
+      if (
+        this.stageCheckpoint?.stageIndex === this.stageIndex &&
+        this.stageCheckpoint.phase === "main" &&
+        this.stageCheckpoint.phaseTimer >= checkpointTime
+      ) return;
+
+      this.saveStageCheckpoint(checkpointTime, "main");
+    }
+
+    saveStageCheckpoint(phaseTimer, phase) {
+      this.stageCheckpoint = {
+        stageIndex: this.stageIndex,
+        loopNumber: this.loopNumber,
+        phase,
+        phaseTimer,
+        stageScroll: this.stageScroll,
+        spawnTimer: this.spawnTimer,
+        volcanoTimer: this.volcanoTimer,
+        sphereTimer: this.sphereTimer,
+        sphereSpawnCount: this.sphereSpawnCount,
+        killCount: this.killCount,
+        formationsLaunched: phase === "air" ? 0 : this.formationsLaunched,
+        formationTimer: phase === "air" ? 0 : this.formationTimer,
+        generatorStates: cloneState(this.generatorStates),
+        walkerStates: cloneState(this.walkerStates),
+        jumperStates: cloneState(this.jumperStates),
+        laserDroneStates: cloneState(this.laserDroneStates),
+        spaceAssault: cloneState(this.spaceAssault),
+        meteorRush: cloneState(this.meteorRush),
+      };
+    }
+
+    restoreStageCheckpoint() {
+      const checkpoint = this.stageCheckpoint;
+      if (!checkpoint || checkpoint.stageIndex !== this.stageIndex) {
+        this.enterStagePhase("air");
+        return;
+      }
+
+      this.loopNumber = checkpoint.loopNumber;
+      this.stagePhase = checkpoint.phase;
+      this.phaseTimer = checkpoint.phaseTimer;
+      this.stageScroll = checkpoint.stageScroll;
+      this.spawnTimer = checkpoint.spawnTimer;
+      this.volcanoTimer = checkpoint.volcanoTimer;
+      this.sphereTimer = checkpoint.sphereTimer;
+      this.sphereSpawnCount = checkpoint.sphereSpawnCount;
+      this.killCount = checkpoint.killCount;
+      this.formationsLaunched = checkpoint.formationsLaunched;
+      this.formationTimer = checkpoint.formationTimer;
+      this.generatorStates = cloneState(checkpoint.generatorStates);
+      this.walkerStates = cloneState(checkpoint.walkerStates);
+      this.jumperStates = cloneState(checkpoint.jumperStates);
+      this.laserDroneStates = cloneState(checkpoint.laserDroneStates);
+      this.spaceAssault = cloneState(checkpoint.spaceAssault);
+      this.meteorRush = cloneState(checkpoint.meteorRush);
+      this.formationGroups.clear();
+      this.bossSpawned = false;
+      this.bossDefeat = null;
     }
 
     updateStageObjects(dt) {
@@ -1006,6 +1096,8 @@
 
     spawnBoss() {
       this.bossSpawned = true;
+      const baseHp = 90 + this.stageIndex * 18;
+      const hp = Math.ceil(baseHp * (1 + 0.25 * (this.loopNumber - 1)));
       this.enemies.push({
         type: "boss",
         x: this.width - 190,
@@ -1013,8 +1105,8 @@
         vx: 0,
         vy: 0,
         radius: 72,
-        hp: 90 + this.stageIndex * 18,
-        maxHp: 90 + this.stageIndex * 18,
+        hp,
+        maxHp: hp,
         moveTimer: 3,
         stopTimer: 0,
         laserTimer: 0,
@@ -1030,8 +1122,8 @@
       this.addBurst(this.width * 0.72, this.height * 0.5, COLORS.lime, 0.9);
       this.stageIndex += 1;
       if (this.stageIndex >= STAGES.length) {
-        this.enterLoopClear();
-        return;
+        this.loopNumber += 1;
+        this.stageIndex = 0;
       }
 
       this.enemies.length = 0;
@@ -1040,7 +1132,11 @@
       this.volcanoShots.length = 0;
       this.capsules.length = 0;
       this.enterStagePhase("air");
-      this.flash(`${STAGES[this.stageIndex].name} START`);
+      this.flash(
+        this.stageIndex === 0 && this.loopNumber > 1
+          ? `LOOP ${this.loopNumber} - STAGE 1`
+          : `${STAGES[this.stageIndex].name} START`,
+      );
     }
 
     startBossDefeat(enemy) {
@@ -1168,10 +1264,11 @@
     }
 
     startGame(startStageIndex = 0) {
-      this.mode = "playing";
+      this.mode = "ready";
       this.lives = 3;
       this.score = 0;
       this.runTime = 0;
+      this.loopNumber = 1;
       this.stageIndex = clamp(Math.floor(startStageIndex), 0, STAGES.length - 1);
       this.stagePhase = "air";
       this.phaseTimer = 0;
@@ -1182,6 +1279,7 @@
       this.bossSpawned = false;
       this.bossDefeat = null;
       this.resetStageObjects();
+      this.saveStageCheckpoint(0, "air");
       this.loopClearTimer = 0;
       this.killCount = 0;
       this.powerCapsules = 0;
@@ -1198,6 +1296,8 @@
       this.gameOverTimer = 0;
       this.gameOverCanConfirm = false;
       this.respawnPowerCapsules = 0;
+      this.readyTimer = 3;
+      this.crashExplosionTimer = 0;
       this.startWasHeld = true;
       Object.assign(this.player, {
         x: 55,
@@ -1220,7 +1320,16 @@
         angle: 0,
         trail: [],
       });
-      this.flash("GET READY");
+      this.flash("READY");
+    }
+
+    updateReady(dt) {
+      this.readyTimer = Math.max(0, this.readyTimer - dt);
+      if (this.readyTimer > 0) return;
+
+      this.mode = "playing";
+      this.player.invincible = RESPAWN_INVINCIBLE;
+      this.flash("GO");
     }
 
     updateRespawn(dt) {
@@ -1272,11 +1381,40 @@
       this.addBurst(this.player.x - 12, this.player.y + 6, COLORS.red, 0.58);
       this.player.crashing = false;
 
-      if (this.lives <= 0) this.enterGameOver();
-      else {
-        this.mode = "respawn";
-        this.respawnTimer = 2;
+      if (this.lives <= 0) {
+        this.enterGameOver();
+        return;
       }
+
+      this.enemies.length = 0;
+      this.souls.length = 0;
+      this.bossBeams.length = 0;
+      this.volcanoShots.length = 0;
+      this.capsules.length = 0;
+      this.playerShots.length = 0;
+      this.missiles.length = 0;
+      this.lasers.length = 0;
+      this.restoreStageCheckpoint();
+      this.mode = "crashExplosion";
+      this.crashExplosionTimer = 0.7;
+    }
+
+    updateCrashExplosion(dt) {
+      this.crashExplosionTimer = Math.max(0, this.crashExplosionTimer - dt);
+      this.updateBursts(dt);
+      this.updateSmoke(dt);
+      if (this.crashExplosionTimer > 0) return;
+
+      this.bursts.length = 0;
+      this.smoke.length = 0;
+      this.player.x = 55;
+      this.player.y = this.height * 0.5;
+      this.player.angle = 0;
+      this.player.crashing = false;
+      this.player.invincible = RESPAWN_INVINCIBLE;
+      this.player.trail = [];
+      this.mode = "ready";
+      this.readyTimer = 3;
     }
 
     crashSurfaceY() {
@@ -1554,6 +1692,7 @@
     }
 
     updateEnemies(dt) {
+      dt *= this.loopDifficultyMultiplier();
       const d = this.difficulty();
       for (const enemy of this.enemies) {
         if (enemy.type === "formation") {
@@ -2145,6 +2284,7 @@
     }
 
     updateBossBeams(dt) {
+      dt *= this.loopDifficultyMultiplier();
       for (const beam of this.bossBeams) {
         if (beam.delay > 0) {
           beam.delay -= dt;
@@ -2223,7 +2363,12 @@
     }
 
     updateSouls(dt) {
+      dt *= this.loopDifficultyMultiplier();
       for (const soul of this.souls) {
+        if (!soul.sizeNormalized) {
+          soul.radius *= 0.5;
+          soul.sizeNormalized = true;
+        }
         soul.x += soul.vx * dt;
         soul.y += soul.vy * dt;
         soul.spin += dt * 5;
@@ -2232,6 +2377,7 @@
     }
 
     updateVolcanoShots(dt) {
+      dt *= this.loopDifficultyMultiplier();
       for (const shot of this.volcanoShots) {
         shot.x += shot.vx * dt;
         shot.y += shot.vy * dt;
@@ -2430,6 +2576,9 @@
       if (projectile) projectile.dead = true;
       this.score += enemy.scoreValue ?? 100;
       this.addBurst(enemy.x, enemy.y, COLORS.pink);
+      if (this.loopNumber >= 2 && enemy.type !== "boss" && enemy.type !== "volcanoRock") {
+        this.fireRevengeBullet(enemy);
+      }
 
       if (enemy.type === "formation") {
         const group = this.formationGroups.get(enemy.groupId);
@@ -2464,6 +2613,23 @@
 
       this.killCount += 1;
       if (this.stagePhase === "main" && this.killCount % 10 === 0) this.dropCapsule(enemy.x, enemy.y);
+    }
+
+    fireRevengeBullet(enemy) {
+      const dx = this.player.x - enemy.x;
+      const dy = this.player.y - enemy.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const speed = 205;
+      this.souls.push({
+        x: enemy.x,
+        y: enemy.y,
+        vx: (dx / length) * speed,
+        vy: (dy / length) * speed,
+        radius: 4.5,
+        spin: Math.random() * TAU,
+        revenge: true,
+        sizeNormalized: true,
+      });
     }
 
     splitSphere(enemy) {
@@ -2641,7 +2807,9 @@
 
       this.withGlow(COLORS.cyan, 10, () => {
         for (const option of state.options) this.drawOption(option, state.time);
-        if (state.mode !== "respawn") this.drawPlayer(state.player, state.time);
+        if (state.mode !== "respawn" && state.mode !== "crashExplosion") {
+          this.drawPlayer(state.player, state.time);
+        }
         for (const shot of state.playerShots) this.drawPlayerShot(shot);
         for (const laser of state.lasers) this.drawLaser(laser, state.time);
       });
@@ -2666,6 +2834,7 @@
 
       if (state.player.shield > 0) this.drawShield(state.player);
       for (const burst of state.bursts) this.drawBurst(burst);
+      if (state.mode === "ready") this.drawReady(state);
       if (state.mode === "playing") this.drawPowerGauge(state);
       this.drawScanlines(state);
     }
@@ -2693,7 +2862,7 @@
     drawTerrain(state) {
       const { width, height, time, mode, stagePhase, stage, stageScroll } = state;
       const ctx = this.ctx;
-      if (mode === "playing" && stagePhase === "air") return;
+      if ((mode === "playing" || mode === "ready") && stagePhase === "air") return;
       if (stage?.spaceAssault || stage?.meteorRush) return;
       if (stage?.terrainMode) {
         this.drawStageTerrain(state);
@@ -3074,6 +3243,22 @@
       ctx.restore();
     }
 
+    drawReady({ width, height, readyTimer }) {
+      if (Math.floor(readyTimer / 0.5) % 2 !== 0) return;
+
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.strokeStyle = COLORS.cyan;
+      ctx.shadowColor = COLORS.cyan;
+      ctx.shadowBlur = 20;
+      ctx.lineWidth = 2;
+      ctx.font = "700 64px Segoe UI, sans-serif";
+      ctx.strokeText("READY", width / 2, height / 2);
+      ctx.restore();
+    }
+
     drawSmoke(particle) {
       const ctx = this.ctx;
       const progress = particle.age / particle.life;
@@ -3422,16 +3607,19 @@
 
     drawSoul(soul) {
       const ctx = this.ctx;
-      ctx.strokeStyle = COLORS.lime;
+      ctx.save();
+      ctx.translate(soul.x, soul.y);
+      ctx.rotate(soul.spin);
+      ctx.strokeStyle = soul.revenge ? COLORS.red : COLORS.lime;
+      if (soul.revenge) {
+        ctx.shadowColor = COLORS.red;
+        ctx.shadowBlur = 12;
+      }
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(soul.x, soul.y, soul.radius, soul.spin, soul.spin + Math.PI * 1.55);
+      ctx.rect(-soul.radius, -soul.radius, soul.radius * 2, soul.radius * 2);
       ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(soul.x + Math.cos(soul.spin) * 2, soul.y + Math.sin(soul.spin) * 2);
-      ctx.quadraticCurveTo(soul.x - 8, soul.y - 10, soul.x + 3, soul.y - 16);
-      ctx.stroke();
+      ctx.restore();
     }
 
     drawVolcanoShot(shot) {
@@ -3549,6 +3737,14 @@
     for (let index = list.length - 1; index >= 0; index -= 1) {
       if (predicate(list[index])) list.splice(index, 1);
     }
+  }
+
+  function cloneState(value) {
+    if (value == null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(cloneState);
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, cloneState(item)]),
+    );
   }
 
   const canvas = document.querySelector("#game");
