@@ -35,6 +35,7 @@
   const CRASH_DURATION = 3;
   const AIR_DURATION = 20;
   const MAIN_DURATION = 120;
+  const PRE_BOSS_DURATION = 30;
   const FORMATION_SIZE = 8;
   const CAPSULE_CYCLE_MAX = 6;
   const GAUGE_LABELS = [...POWERUPS];
@@ -194,6 +195,8 @@
       this.laserDroneStates = [];
       this.spaceAssault = null;
       this.meteorRush = null;
+      this.warpSpawnTimer = 0;
+      this.enemySpawnCount = 0;
       this.loopClearTimer = 0;
       this.loopNumber = 1;
       this.killCount = 0;
@@ -337,6 +340,7 @@
       if (this.flashTimer > 0) return this.flashText;
       if (this.stagePhase === "bossClear") return "BOSS DOWN";
       if (this.stagePhase === "boss") return `${STAGES[this.stageIndex].name} BOSS`;
+      if (this.stagePhase === "preBoss") return `${STAGES[this.stageIndex].name} WARP ZONE`;
       if (this.stagePhase === "air") return `${STAGES[this.stageIndex].name} AIR`;
       return usingGamepad ? "A / R2 FIRE • B / L1 POWER" : "Z FIRE / X POWER";
     }
@@ -512,7 +516,19 @@
         !STAGES[this.stageIndex].spaceAssault &&
         this.phaseTimer >= MAIN_DURATION
       ) {
-        this.enterStagePhase("boss");
+        this.enterStagePhase("preBoss");
+      }
+
+      if (this.stagePhase === "preBoss") {
+        if (STAGES[this.stageIndex].terrainMode) this.stageScroll += 92 * dt;
+        this.warpSpawnTimer -= dt;
+        if (this.warpSpawnTimer <= 0) {
+          this.warpSpawnTimer = 1.1;
+          this.spawnWarpEnemy();
+        }
+        if (this.phaseTimer >= PRE_BOSS_DURATION) {
+          this.enterStagePhase("boss");
+        }
       }
 
       if (this.stagePhase === "boss" && !this.bossSpawned) {
@@ -532,6 +548,7 @@
       this.bossDefeat = null;
       if (phase === "air") {
         this.stageScroll = 0;
+        this.enemySpawnCount = 0;
         this.formationTimer = 0;
         this.formationsLaunched = 0;
         this.formationGroups.clear();
@@ -541,14 +558,46 @@
       if (phase === "main") {
         this.saveStageCheckpoint(0, "main");
       }
+      if (phase === "preBoss") {
+        this.selfDestructEnemies();
+        this.warpSpawnTimer = 0.35;
+        this.flash("WARNING - WARP ZONE");
+      }
       if (phase === "boss") {
-        this.enemies.length = 0;
-        this.souls.length = 0;
-        this.bossBeams.length = 0;
-        this.volcanoShots.length = 0;
+        this.selfDestructEnemies();
         this.capsules.length = 0;
         this.flash(`${STAGES[this.stageIndex].name} BOSS`);
       }
+    }
+
+    selfDestructEnemies() {
+      for (const enemy of this.enemies) {
+        this.addBurst(enemy.x, enemy.y, COLORS.amber, 0.48);
+        this.addBurst(enemy.x, enemy.y, COLORS.red, 0.34);
+      }
+      this.enemies.length = 0;
+    }
+
+    spawnWarpEnemy() {
+      const minDistance = this.width / 6;
+      const x = Math.min(
+        this.width - 65,
+        this.player.x + minDistance + Math.random() * (this.width * 0.22),
+      );
+      this.enemies.push({
+        type: "warpEnemy",
+        x,
+        y: 75 + Math.random() * (this.height - 175),
+        radius: 18,
+        hp: 1,
+        maxHp: 1,
+        state: "warp",
+        warpTimer: 0.3,
+        vx: 0,
+        vy: 0,
+        phase: Math.random() * TAU,
+        scoreValue: 140,
+      });
     }
 
     resetStageObjects() {
@@ -623,6 +672,7 @@
         sphereTimer: this.sphereTimer,
         sphereSpawnCount: this.sphereSpawnCount,
         killCount: this.killCount,
+        enemySpawnCount: this.enemySpawnCount,
         formationsLaunched: phase === "air" ? 0 : this.formationsLaunched,
         formationTimer: phase === "air" ? 0 : this.formationTimer,
         generatorStates: cloneState(this.generatorStates),
@@ -650,6 +700,7 @@
       this.sphereTimer = checkpoint.sphereTimer;
       this.sphereSpawnCount = checkpoint.sphereSpawnCount;
       this.killCount = checkpoint.killCount;
+      this.enemySpawnCount = checkpoint.enemySpawnCount;
       this.formationsLaunched = checkpoint.formationsLaunched;
       this.formationTimer = checkpoint.formationTimer;
       this.generatorStates = cloneState(checkpoint.generatorStates);
@@ -787,7 +838,7 @@
 
       assault.loopIndex += 1;
       if (assault.loopIndex >= (stage.spaceAssault.loopCount ?? 2)) {
-        this.enterStagePhase("boss");
+        this.enterStagePhase("preBoss");
         return;
       }
 
@@ -1104,7 +1155,9 @@
         y: this.height * 0.5,
         vx: 0,
         vy: 0,
-        radius: 72,
+        radius: 55,
+        halfWidth: 78,
+        halfHeight: 48,
         hp,
         maxHp: hp,
         moveTimer: 3,
@@ -1191,8 +1244,6 @@
     }
 
     updateStars(dt) {
-      if (this.mode === "playing" && this.stagePhase === "boss") return;
-
       for (const star of this.stars) {
         star.x -= dt * (32 + star.layer * 44);
         if (star.x < -8) {
@@ -1695,6 +1746,13 @@
       dt *= this.loopDifficultyMultiplier();
       const d = this.difficulty();
       for (const enemy of this.enemies) {
+        this.assignEnemyCapsuleState(enemy);
+
+        if (enemy.type === "warpEnemy") {
+          this.updateWarpEnemy(enemy, dt);
+          continue;
+        }
+
         if (enemy.type === "formation") {
           this.updateFormationEnemy(enemy, dt);
           continue;
@@ -1829,6 +1887,43 @@
         radius: 9,
         spin: Math.random() * TAU,
       });
+    }
+
+    assignEnemyCapsuleState(enemy) {
+      if (enemy.capsuleStateAssigned) return;
+      enemy.capsuleStateAssigned = true;
+      if (
+        enemy.type === "formation" ||
+        enemy.type === "boss" ||
+        enemy.type === "meteor" ||
+        enemy.type === "volcanoRock" ||
+        enemy.capsuleMode === "none"
+      ) return;
+
+      this.enemySpawnCount += 1;
+      enemy.carriesCapsule =
+        (enemy.type === "sphere" && enemy.variant === "red" && enemy.tier <= 2) ||
+        this.enemySpawnCount % 10 === 0;
+    }
+
+    updateWarpEnemy(enemy, dt) {
+      enemy.phase += dt * 9;
+      if (enemy.state === "warp") {
+        enemy.warpTimer -= dt;
+        if (enemy.warpTimer > 0) return;
+
+        const dx = this.player.x - enemy.x;
+        const dy = this.player.y - enemy.y;
+        const length = Math.hypot(dx, dy) || 1;
+        const speed = 650;
+        enemy.vx = (dx / length) * speed;
+        enemy.vy = (dy / length) * speed;
+        enemy.state = "rush";
+        return;
+      }
+
+      enemy.x += enemy.vx * dt;
+      enemy.y += enemy.vy * dt;
     }
 
     updateSphereEnemy(enemy, dt) {
@@ -2529,6 +2624,14 @@
     }
 
     enemyIntersectsPoint(enemy, x, y, radius = 0) {
+      if (enemy.type === "boss") {
+        const halfWidth = (enemy.halfWidth ?? 78) + radius;
+        const halfHeight = (enemy.halfHeight ?? 48) + radius;
+        const dx = (x - enemy.x) / halfWidth;
+        const dy = (y - enemy.y) / halfHeight;
+        return dx * dx + dy * dy <= 1;
+      }
+
       if (enemy.type === "generatorCore") {
         const halfWidth = enemy.halfWidth ?? 60;
         return Math.abs(x - enemy.x) < halfWidth + radius && Math.abs(y - enemy.y) < 24 + radius;
@@ -2538,6 +2641,16 @@
     }
 
     laserHitsEnemy(laser, enemy) {
+      if (enemy.type === "boss") {
+        const left = enemy.x - (enemy.halfWidth ?? 78);
+        const right = enemy.x + (enemy.halfWidth ?? 78);
+        return (
+          right > laser.x &&
+          left < laser.x + laser.length &&
+          Math.abs(enemy.y - laser.y) < (enemy.halfHeight ?? 48) + laser.radius
+        );
+      }
+
       if (enemy.type === "generatorCore") {
         const left = enemy.x - (enemy.halfWidth ?? 60);
         const right = enemy.x + (enemy.halfWidth ?? 60);
@@ -2576,6 +2689,7 @@
       if (projectile) projectile.dead = true;
       this.score += enemy.scoreValue ?? 100;
       this.addBurst(enemy.x, enemy.y, COLORS.pink);
+      if (enemy.carriesCapsule) this.dropCapsule(enemy.x, enemy.y);
       if (this.loopNumber >= 2 && enemy.type !== "boss" && enemy.type !== "volcanoRock") {
         this.fireRevengeBullet(enemy);
       }
@@ -2604,7 +2718,6 @@
       }
 
       if (enemy.type === "sphere") {
-        if (enemy.variant === "red" && enemy.tier <= 2) this.dropCapsule(enemy.x, enemy.y);
         this.splitSphere(enemy);
         return;
       }
@@ -2612,7 +2725,6 @@
       if (enemy.type === "volcanoRock") return;
 
       this.killCount += 1;
-      if (this.stagePhase === "main" && this.killCount % 10 === 0) this.dropCapsule(enemy.x, enemy.y);
     }
 
     fireRevengeBullet(enemy) {
@@ -3150,7 +3262,7 @@
       const ctx = this.ctx;
       for (const star of stars) {
         const pulse = 0.6 + Math.sin(time * 4 + star.phase) * 0.35;
-        ctx.strokeStyle = star.layer === 3 ? COLORS.cyan : "rgba(185, 255, 120, 0.75)";
+        ctx.strokeStyle = star.layer === 3 ? COLORS.blue : "rgba(185, 255, 120, 0.75)";
         ctx.lineWidth = star.layer;
         ctx.beginPath();
         ctx.moveTo(star.x - star.layer * 5 * pulse, star.y);
@@ -3314,6 +3426,16 @@
     }
 
     drawEnemy(enemy, time) {
+      if (enemy.type === "boss") {
+        this.drawBossEnemy(enemy, time);
+        return;
+      }
+
+      if (enemy.type === "warpEnemy") {
+        this.drawWarpEnemy(enemy, time);
+        return;
+      }
+
       if (enemy.type === "meteor") {
         this.drawMeteorEnemy(enemy);
         return;
@@ -3362,7 +3484,7 @@
       const ctx = this.ctx;
       const wobble = Math.sin(time * 5 + enemy.phase) * 4;
       const scale = enemy.type === "boss" ? 2.75 : 1;
-      ctx.strokeStyle = COLORS.pink;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = enemy.type === "boss" ? 5 : 3;
       ctx.beginPath();
       ctx.moveTo(enemy.x - 24 * scale, enemy.y);
@@ -3387,6 +3509,72 @@
         ctx.lineTo(enemy.x - 58 + 116 * ratio, enemy.y + 88);
         ctx.stroke();
       }
+    }
+
+    drawBossEnemy(enemy, time) {
+      const ctx = this.ctx;
+      const halfWidth = enemy.halfWidth ?? 78;
+      const halfHeight = enemy.halfHeight ?? 48;
+      const pulse = Math.sin(time * 5) * 3;
+      ctx.strokeStyle = COLORS.cyan;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - halfWidth, enemy.y);
+      ctx.lineTo(enemy.x - halfWidth * 0.5, enemy.y - halfHeight - pulse);
+      ctx.lineTo(enemy.x + halfWidth * 0.5, enemy.y - halfHeight - pulse);
+      ctx.lineTo(enemy.x + halfWidth, enemy.y);
+      ctx.lineTo(enemy.x + halfWidth * 0.5, enemy.y + halfHeight + pulse);
+      ctx.lineTo(enemy.x - halfWidth * 0.5, enemy.y + halfHeight + pulse);
+      ctx.closePath();
+      ctx.stroke();
+
+      ctx.strokeStyle = COLORS.red;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(enemy.x, enemy.y, 12, 0, TAU);
+      ctx.stroke();
+
+      const ratio = Math.max(0, enemy.hp / enemy.maxHp);
+      ctx.strokeStyle = COLORS.lime;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - halfWidth, enemy.y + halfHeight + 24);
+      ctx.lineTo(enemy.x - halfWidth + halfWidth * 2 * ratio, enemy.y + halfHeight + 24);
+      ctx.stroke();
+    }
+
+    drawWarpEnemy(enemy, time) {
+      const ctx = this.ctx;
+      const color = this.enemyBaseColor(enemy);
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y);
+      ctx.rotate(enemy.phase);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      if (enemy.state === "warp") {
+        const progress = 1 - enemy.warpTimer / 0.3;
+        ctx.globalAlpha = 0.35 + progress * 0.65;
+        ctx.beginPath();
+        ctx.arc(0, 0, 30 - progress * 10, 0, TAU);
+        ctx.moveTo(-34, 0);
+        ctx.lineTo(34, 0);
+        ctx.moveTo(0, -34);
+        ctx.lineTo(0, 34);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.moveTo(22, 0);
+      ctx.lineTo(-14, -15);
+      ctx.lineTo(-7, 0);
+      ctx.lineTo(-14, 15);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    enemyBaseColor(enemy) {
+      if (enemy.type === "formation") return COLORS.pink;
+      return enemy.carriesCapsule ? COLORS.red : COLORS.cyan;
     }
 
     drawMeteorEnemy(enemy) {
@@ -3418,7 +3606,7 @@
 
     drawMeteorRaider(enemy, time) {
       const ctx = this.ctx;
-      ctx.strokeStyle = COLORS.pink;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(enemy.x - 23, enemy.y);
@@ -3442,7 +3630,7 @@
       ctx.save();
       ctx.translate(enemy.x, enemy.y);
       ctx.rotate(direction > 0 ? Math.PI / 2 : -Math.PI / 2);
-      ctx.strokeStyle = COLORS.pink;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(22, 0);
@@ -3464,7 +3652,7 @@
     drawSpaceCruiser(enemy, time) {
       const ctx = this.ctx;
       const pulse = Math.sin(time * 5) * 4;
-      ctx.strokeStyle = COLORS.pink;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(enemy.x - 52, enemy.y);
@@ -3497,7 +3685,7 @@
       const ctx = this.ctx;
       const halfWidth = enemy.halfWidth ?? 60;
       const ratio = Math.max(0, enemy.hp / enemy.maxHp);
-      ctx.strokeStyle = COLORS.pink;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.rect(enemy.x - halfWidth, enemy.y - 18, halfWidth * 2, 36);
@@ -3514,8 +3702,8 @@
 
     drawSphereEnemy(enemy) {
       const ctx = this.ctx;
-      const primary = enemy.variant === "red" ? COLORS.red : COLORS.blue;
-      const secondary = enemy.variant === "red" ? COLORS.amber : COLORS.cyan;
+      const primary = this.enemyBaseColor(enemy);
+      const secondary = enemy.carriesCapsule ? COLORS.amber : COLORS.blue;
       ctx.strokeStyle = primary;
       ctx.lineWidth = Math.max(2, Math.min(6, enemy.radius / 9));
       ctx.beginPath();
@@ -3550,7 +3738,7 @@
       ctx.closePath();
       ctx.stroke();
 
-      ctx.strokeStyle = COLORS.pink;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(enemy.x - 8, bodyY);
@@ -3578,7 +3766,7 @@
       const pulse = Math.sin(time * 12 + enemy.phase) * 3;
       const bodyY = enemy.y - dir * 18;
 
-      ctx.strokeStyle = COLORS.red;
+      ctx.strokeStyle = this.enemyBaseColor(enemy);
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(enemy.x - 22, bodyY);
@@ -3610,11 +3798,9 @@
       ctx.save();
       ctx.translate(soul.x, soul.y);
       ctx.rotate(soul.spin);
-      ctx.strokeStyle = soul.revenge ? COLORS.red : COLORS.lime;
-      if (soul.revenge) {
-        ctx.shadowColor = COLORS.red;
-        ctx.shadowBlur = 12;
-      }
+      ctx.strokeStyle = COLORS.amber;
+      ctx.shadowColor = COLORS.amber;
+      ctx.shadowBlur = 10;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.rect(-soul.radius, -soul.radius, soul.radius * 2, soul.radius * 2);
